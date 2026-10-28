@@ -70,12 +70,18 @@ footer{margin-top:34px;color:var(--dim);font-size:12.5px;text-align:center;font-
   <div id="secciones"></div>
   <dialog id="dlg"><form method="dialog">
     <h2>Editar enlaces</h2>
-    <p>Cambiá el nombre o pegá el link de cada tarjeta. Se guarda en este navegador.</p>
+    <p>Cambiá el nombre o pegá el link de cada tarjeta. Al guardar, lo ve todo el que abra esta página.</p>
+    <div id="login" hidden>
+      <p style="margin-top:4px">Para guardar, entrá con el usuario administrador de Mi Productividad.</p>
+      <div class="lf"><label>Correo<input type="email" id="aMail" autocomplete="username"></label><label>Contraseña<input type="password" id="aPass" autocomplete="current-password"></label></div>
+    </div>
+    <p id="aErr" style="color:#ff7a7a" hidden></p>
     <div id="campos"></div>
     <div class="acts"><button class="btn" type="button" id="restaurar">Restaurar originales</button><div><button class="btn" value="cancel">Cancelar</button><button class="btn solid" type="button" id="guardar">Guardar</button></div></div>
   </form></dialog>
   <footer>CD Mercado Central · Warehouse</footer>
 </main>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <script>
 // Links de fábrica. Si "url" queda vacío, la tarjeta aparece como pendiente.
 // Lo que se cambia con "Editar enlaces" se guarda en el navegador y pisa estos valores.
@@ -84,7 +90,7 @@ const SECCIONES = [
     { id: "prod", t: "Mi Productividad", sub: "", d: "Productividad, ranking y ficha de cada operador", url: "https://indicadoresmc.github.io/app/", ico: "prod", c: "var(--amber)" },
     { id: "cal", t: "Rondas de Calidad", sub: "", d: "Conformidad y adherencia por sector", url: "https://rondascalidad-dmc.github.io/app/", ico: "cal", c: "var(--green)" },
     { id: "tr", t: "Diaria", sub: "| Team Room", d: "KPIs de la Diaria y arranque de turno", url: "https://diaria-teamroom.github.io/app/", ico: "tr", c: "var(--cyan)" },
-    { id: "layout", t: "Layout del CD", sub: "", d: "Plano 3D de áreas y sectores", url: "https://claude.ai/artifact/V4LmHMBsawFTux6KzCNAjw", ico: "map", c: "var(--orange)" }
+    { id: "layout", t: "Layout del CD", sub: "", d: "Plano 3D de áreas y sectores", url: "https://claude.ai/artifact/V4LmHMBsawETux6KzCNAjw", ico: "map", c: "var(--orange)" }
   ]},
   { titulo: "Power BI", links: [
     { id: "bi1", t: "Power BI", sub: "1", d: "", url: "", ico: "bi", c: "var(--amber)" },
@@ -104,6 +110,21 @@ const $ = s => document.querySelector(s);
 const leer = () => { try { return JSON.parse(localStorage.getItem(CLAVE)) || {}; } catch { return {}; } };
 const escribir = v => { try { localStorage.setItem(CLAVE, JSON.stringify(v)); } catch {} };
 const actual = l => ({ ...l, ...(leer()[l.id] || {}) });
+/* Los cambios se guardan en Supabase (mismo proyecto que Mi Productividad): todos los ven, solo el admin los cambia */
+const SB_URL = "https://chwxnahvdpufcuyjpocj.supabase.co", SB_KEY = "sb_publishable_4uRwwSKwjzv5T84NF2PZ-Q_-9O__I_B";
+const sb = (window.supabase && window.supabase.createClient) ? window.supabase.createClient(SB_URL, SB_KEY) : null;
+async function traer() {
+  if (!sb) return;
+  const { data, error } = await sb.from("compartido").select("datos").eq("app", "links").eq("coleccion", "enlaces").eq("id", "main").maybeSingle();
+  if (error) return;
+  escribir((data && data.datos) || {}); render();
+}
+async function esAdmin() { if (!sb) return false; const { data } = await sb.auth.getSession(); return !!(data && data.session); }
+async function subir(v) {
+  if (!sb) throw new Error("sin conexión");
+  const { error } = await sb.from("compartido").upsert({ app: "links", coleccion: "enlaces", id: "main", datos: v, actualizado: new Date().toISOString() });
+  if (error) throw error;
+}
 const nombre = l => l.t + (l.sub ? " " + l.sub : "");
 
 function render() {
@@ -118,18 +139,37 @@ const todos = () => SECCIONES.flatMap(s => s.links);
 $("#editar").onclick = () => {
   $("#campos").innerHTML = todos().map(x => { const l = actual(x);
     return `<div class="lf"><label>Nombre<input id="n_${x.id}" value="${esc(l.nombre ?? nombre(x))}"></label><label>Link<input type="url" id="u_${x.id}" value="${esc(l.url)}" placeholder="https://…"></label></div>`; }).join("");
+  $("#aErr").hidden = true;
+  esAdmin().then(a => { $("#login").hidden = a; });
   $("#dlg").showModal();
 };
+async function guardarCompartido(v) {
+  $("#aErr").hidden = true;
+  try {
+    if (!(await esAdmin())) {
+      const mail = $("#aMail").value.trim(), pass = $("#aPass").value;
+      if (!mail || !pass) throw new Error("Completá correo y contraseña de administrador");
+      const { error } = await sb.auth.signInWithPassword({ email: mail, password: pass });
+      if (error) throw new Error("Correo o contraseña incorrectos");
+      $("#aPass").value = "";
+    }
+    await subir(v);
+    escribir(v); render(); $("#dlg").close();
+  } catch (e) {
+    $("#aErr").textContent = e.message && !e.code ? e.message : "No se pudo guardar. Revisá que el usuario sea administrador.";
+    $("#aErr").hidden = false;
+  }
+}
 $("#guardar").onclick = () => {
   const v = {};
   todos().forEach(x => { const n = $("#n_" + x.id).value.trim(), u = $("#u_" + x.id).value.trim(), o = {};
     if (n && n !== nombre(x)) o.nombre = n;
     if (u !== x.url) o.url = u && !/^https?:\/\//i.test(u) ? "https://" + u : u;
     if (Object.keys(o).length) v[x.id] = o; });
-  escribir(v); render(); $("#dlg").close();
+  guardarCompartido(v);
 };
-$("#restaurar").onclick = () => { if (confirm("¿Volver a los nombres y links originales?")) { escribir({}); render(); $("#dlg").close(); } };
-render();
+$("#restaurar").onclick = () => { if (confirm("¿Volver a los nombres y links originales?")) guardarCompartido({}); };
+render(); traer();
 </script>
 </body>
 </html>
